@@ -1,158 +1,303 @@
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useEffect, useState } from "react";
 import {
-  Button,
-  FlatList,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
   View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ActivityIndicator,
+  Switch,
+  Alert,
 } from "react-native";
+import MapView, { Marker, MapPressEvent } from "react-native-maps";
+import * as Location from "expo-location";
 
-type Note = {
-  id: string;
-  text: string;
+type LatLng = {
+  latitude: number;
+  longitude: number;
 };
 
-const STORAGE_KEY = "MY_NOTES_V1";
+// ÖRNEK: Lefkoşa merkez taksi durağı koordinatı (temsilî)
+const TAXI_STAND: LatLng = {
+  latitude: 35.1735,
+  longitude: 33.3639,
+};
+
+const AVG_DRIVER_SPEED_KMH = 40; // ortalama hız varsayımı
 
 export default function Index() {
-  const [input, setInput] = useState("");
-  const [notes, setNotes] = useState<Note[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [currentLocation, setCurrentLocation] = useState<LatLng | null>(null);
+  const [destination, setDestination] = useState<LatLng | null>(null);
+  const [loadingLocation, setLoadingLocation] = useState(true);
+  const [isNight, setIsNight] = useState(false);
 
-  // Uygulama açılınca kaydedilmiş notları yükle
+  // Gündüz / gece tarifeleri
+  const DAY_BASE = 60;
+  const DAY_PER_KM = 15;
+
+  const NIGHT_BASE = 80;
+  const NIGHT_PER_KM = 18;
+
   useEffect(() => {
-    async function loadNotes() {
-      try {
-        const saved = await AsyncStorage.getItem(STORAGE_KEY);
-        if (saved) {
-          setNotes(JSON.parse(saved));
-        }
-      } catch (e) {
-        console.log("Notlar yüklenirken hata:", e);
-      } finally {
-        setLoading(false);
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        setLoadingLocation(false);
+        return;
       }
-    }
 
-    loadNotes();
+      const loc = await Location.getCurrentPositionAsync({});
+      setCurrentLocation({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+      });
+      setLoadingLocation(false);
+    })();
   }, []);
 
-  // Notlar değiştikçe storage'a kaydet
-  useEffect(() => {
-    async function saveNotes() {
-      try {
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
-      } catch (e) {
-        console.log("Notlar kaydedilirken hata:", e);
-      }
-    }
-
-    if (!loading) {
-      saveNotes();
-    }
-  }, [notes, loading]);
-
-  function addNote() {
-    const trimmed = input.trim();
-    if (!trimmed) return;
-
-    const newNote: Note = {
-      id: Date.now().toString(),
-      text: trimmed,
-    };
-
-    setNotes((prev) => [...prev, newNote]);
-    setInput("");
+  function onMapLongPress(e: MapPressEvent) {
+    setDestination(e.nativeEvent.coordinate);
   }
 
-  function deleteNote(id: string) {
-    setNotes((prev) => prev.filter((n) => n.id !== id));
+  // İki nokta arası mesafe (km) – Haversine
+  function getDistanceKm(a: LatLng, b: LatLng) {
+    const R = 6371; // km
+    const dLat = ((b.latitude - a.latitude) * Math.PI) / 180;
+    const dLon = ((b.longitude - a.longitude) * Math.PI) / 180;
+    const lat1 = (a.latitude * Math.PI) / 180;
+    const lat2 = (b.latitude * Math.PI) / 180;
+
+    const sin1 = Math.sin(dLat / 2);
+    const sin2 = Math.sin(dLon / 2);
+
+    const c =
+      2 *
+      Math.asin(
+        Math.sqrt(
+          sin1 * sin1 +
+            Math.cos(lat1) * Math.cos(lat2) * sin2 * sin2
+        )
+      );
+
+    return R * c;
+  }
+
+  // Hesaplamalar
+  let rideDistanceKm = 0;
+  let estimatedFare = 0;
+  let driverToPassengerKm = 0;
+  let driverEtaMin = 0;
+
+  const baseFare = isNight ? NIGHT_BASE : DAY_BASE;
+  const perKm = isNight ? NIGHT_PER_KM : DAY_PER_KM;
+
+  if (currentLocation && destination) {
+    rideDistanceKm = getDistanceKm(currentLocation, destination);
+    estimatedFare = baseFare + rideDistanceKm * perKm;
+  }
+
+  if (currentLocation) {
+    // Şoförün durağından yolcunun bulunduğu yere mesafe
+    driverToPassengerKm = getDistanceKm(TAXI_STAND, currentLocation);
+    driverEtaMin = (driverToPassengerKm / AVG_DRIVER_SPEED_KMH) * 60;
+  }
+
+  function handleRequestTaxi() {
+    if (!currentLocation || !destination) {
+      Alert.alert("Eksik bilgi", "Lütfen haritada gideceğin yeri seç.");
+      return;
+    }
+
+    const summary =
+      `Tarife: ${isNight ? "Gece" : "Gündüz"}\n` +
+      `Şoförün sana uzaklığı: ${driverToPassengerKm.toFixed(1)} km (~${driverEtaMin.toFixed(
+        0
+      )} dk)\n` +
+      `Yolculuk mesafesi: ${rideDistanceKm.toFixed(2)} km\n` +
+      `Tahmini ücret: ${estimatedFare.toFixed(0)} TL`;
+
+    // Şimdilik sadece gösteriyoruz – buraya Supabase/Firebase isteği eklenir
+    console.log("Yeni yolculuk isteği:", {
+      isNight,
+      pickup: currentLocation,
+      destination,
+      driverDistanceKm: driverToPassengerKm,
+      driverEtaMin,
+      rideDistanceKm,
+      estimatedFare,
+    });
+
+    Alert.alert("Taksi isteği oluşturuldu (demo)", summary);
+  }
+
+  if (loadingLocation) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#3f72ff" />
+        <Text style={{ color: "white", marginTop: 8 }}>
+          Konum alınıyor...
+        </Text>
+      </View>
+    );
+  }
+
+  if (!currentLocation) {
+    return (
+      <View style={styles.center}>
+        <Text style={{ color: "white", textAlign: "center" }}>
+          Konum izni verilmedi. Ayarlardan konum izni açmalısın.
+        </Text>
+      </View>
+    );
   }
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Notlarım</Text>
-
-      <View style={styles.inputRow}>
-        <TextInput
-          style={styles.input}
-          placeholder="Yeni not..."
-          value={input}
-          onChangeText={setInput}
+      <MapView
+        style={styles.map}
+        initialRegion={{
+          latitude: currentLocation.latitude,
+          longitude: currentLocation.longitude,
+          latitudeDelta: 0.02,
+          longitudeDelta: 0.02,
+        }}
+        onLongPress={onMapLongPress}
+      >
+        {/* Şoför durağı */}
+        <Marker
+          coordinate={TAXI_STAND}
+          title="Taksi durağı (örnek)"
+          pinColor="gold"
         />
-        <Button title="Ekle" onPress={addNote} />
-      </View>
 
-      {loading ? (
-        <Text>Yükleniyor...</Text>
-      ) : (
-        <FlatList
-          data={notes}
-          keyExtractor={(item) => item.id}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>
-              Henüz not yok, bir tane ekle 🙂
+        {/* Yolcu */}
+        <Marker
+          coordinate={currentLocation}
+          title="Buradasın"
+          pinColor="blue"
+        />
+
+        {/* Hedef */}
+        {destination && (
+          <Marker
+            coordinate={destination}
+            title="Gitmek istediğin yer"
+            pinColor="red"
+          />
+        )}
+      </MapView>
+
+      {/* Alt panel */}
+      <View style={styles.bottomPanel}>
+        <View style={styles.rowBetween}>
+          <Text style={styles.panelTitle}>KKTC Taksi Hesaplayıcı</Text>
+        </View>
+
+        <View style={styles.tariffRow}>
+          <Text style={styles.tariffText}>
+            Tarife: {isNight ? "Gece" : "Gündüz"}
+          </Text>
+          <Switch
+            value={isNight}
+            onValueChange={setIsNight}
+            thumbColor={"white"}
+          />
+        </View>
+
+        <Text style={styles.infoText}>
+          Şoför durağı → sana:{" "}
+          <Text style={styles.bold}>
+            {driverToPassengerKm.toFixed(1)} km (~{driverEtaMin.toFixed(0)} dk)
+          </Text>
+        </Text>
+
+        {!destination ? (
+          <Text style={styles.infoText}>
+            Gitmek istediğin yere haritada{" "}
+            <Text style={styles.bold}>uzun bas</Text> (long press) ile işaretle.
+          </Text>
+        ) : (
+          <>
+            <Text style={styles.infoText}>
+              Sen → hedef mesafe:{" "}
+              <Text style={styles.bold}>
+                {rideDistanceKm.toFixed(2)} km
+              </Text>
             </Text>
-          }
-          renderItem={({ item }) => (
+            <Text style={styles.infoText}>
+              Tahmini ücret ({isNight ? "gece" : "gündüz"}):{" "}
+              <Text style={styles.bold}>
+                {estimatedFare.toFixed(0)} TL
+              </Text>
+            </Text>
+
             <TouchableOpacity
-              onLongPress={() => deleteNote(item.id)}
-              style={styles.noteItem}
+              style={styles.button}
+              onPress={handleRequestTaxi}
             >
-              <Text style={styles.noteText}>{item.text}</Text>
-              <Text style={styles.noteHint}>(Silmek için uzun bas)</Text>
+              <Text style={styles.buttonText}>Taksi Çağır (demo)</Text>
             </TouchableOpacity>
-          )}
-        />
-      )}
+          </>
+        )}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    paddingTop: 60,
+  container: { flex: 1, backgroundColor: "#0f0f14" },
+  map: { flex: 1 },
+  bottomPanel: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
     paddingHorizontal: 16,
-    backgroundColor: "#fff",
+    paddingVertical: 14,
+    backgroundColor: "rgba(0,0,0,0.85)",
   },
-  title: {
-    fontSize: 28,
-    fontWeight: "bold",
-    marginBottom: 16,
+  panelTitle: {
+    color: "white",
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 6,
   },
-  inputRow: {
+  rowBetween: {
     flexDirection: "row",
-    gap: 8,
-    marginBottom: 16,
+    justifyContent: "space-between",
+    alignItems: "center",
   },
-  input: {
-    flex: 1,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  noteItem: {
-    padding: 12,
-    borderWidth: 1,
-    borderRadius: 8,
+  tariffRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     marginBottom: 8,
   },
-  noteText: {
+  tariffText: {
+    color: "white",
+    fontSize: 15,
+  },
+  infoText: {
+    color: "white",
+    fontSize: 14,
+    marginTop: 2,
+  },
+  bold: { fontWeight: "700" },
+  button: {
+    marginTop: 10,
+    backgroundColor: "#3f72ff",
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  buttonText: {
+    color: "white",
+    fontWeight: "700",
     fontSize: 16,
   },
-  noteHint: {
-    fontSize: 11,
-    color: "gray",
-    marginTop: 4,
-  },
-  emptyText: {
-    textAlign: "center",
-    color: "gray",
-    marginTop: 16,
+  center: {
+    flex: 1,
+    backgroundColor: "#0f0f14",
+    justifyContent: "center",
+    alignItems: "center",
   },
 });
